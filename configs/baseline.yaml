@@ -1,0 +1,33 @@
+# ReSAGE Baseline Configuration
+
+# Dataset settings
+dataset:
+  root_dir: "d:/My_Projects/ReSAGE/data"
+  train_split: "train"
+  test_split: "test"
+  validation_split: 0.10  # 10% of training data for validation
+  num_workers: 2
+
+# Training settings
+training:
+  seed: 42
+  batch_size: 16
+  learning_rate: 1.0e-3
+  epochs: 50
+  mixed_precision: true
+  checkpoint_dir: "d:/My_Projects/ReSAGE/checkpoints"
+  best_checkpoint_path: "d:/My_Projects/ReSAGE/checkpoints/baseline_best.pth"
+  latest_checkpoint_path: "d:/My_Projects/ReSAGE/checkpoints/baseline_latest.pth"
+
+# Model settings
+model:
+  in_channels: 1
+  out_channels: 1
+  mid_channels: 64
+  num_residual_blocks: 4
+  upscale_factor: 2
+
+# Loss settings
+loss:
+  l1_weight: 1.0
+  ssim_weight: 0.1

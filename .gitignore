@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data and models
+data/
+checkpoints/
+outputs/
+reports/*.png
+reports/*.txt
+reports/*.json
+
+# IDEs and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
