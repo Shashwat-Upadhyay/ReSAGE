@@ -79,32 +79,51 @@ def log_json(path: str, entry: dict):
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
     model.train()
     total_loss = 0.0
-    total_l1   = 0.0
+    total_l1 = 0.0
     total_ssim = 0.0
 
     for noisy, gt in loader:
         noisy = noisy.to(device, non_blocking=True)
-        gt    = gt.to(device,    non_blocking=True)
+        gt = gt.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
-            pred             = model(noisy)
-            loss, l1, ssim_l = criterion(pred, gt)
+        # Full FP32 training for numerical stability
+        pred = model(noisy)
+        loss, l1, ssim_l = criterion(pred, gt)
 
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Non-finite loss at epoch {epoch}: "
+                f"loss={loss.item()}, l1={l1.item()}, ssim={ssim_l.item()}"
+            )
+
+        loss.backward()
+
+        grad_norm = nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0
+        )
+
+        if not torch.isfinite(grad_norm):
+            raise FloatingPointError(
+                f"Non-finite gradient at epoch {epoch}: "
+                f"grad_norm={grad_norm}"
+            )
+
+        optimizer.step()
 
         total_loss += loss.item()
-        total_l1   += l1.item()
+        total_l1 += l1.item()
         total_ssim += ssim_l.item()
 
     n = len(loader)
-    return total_loss / n, total_l1 / n, total_ssim / n
 
+    return (
+        total_loss / n,
+        total_l1 / n,
+        total_ssim / n
+    )
 
 @torch.no_grad()
 def validate(model, loader, criterion, metrics_tracker, device, vis_dir, epoch, num_vis=4):
@@ -191,7 +210,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg["training"]["epochs"], eta_min=1e-6
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = None
 
     # ── resume ─────────────────────────────────────────────────────────────────
     start_epoch = 0

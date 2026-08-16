@@ -16,3 +16,6 @@ reports/*.json
 .idea/
 .DS_Store
 Thumbs.db
+
+# Temporary Kaggle transfer archives
+*.zip

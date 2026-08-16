@@ -14,7 +14,7 @@ training:
   batch_size: 16
   learning_rate: 1.0e-3
   epochs: 50
-  mixed_precision: true
+  mixed_precision: false
   checkpoint_dir: "d:/My_Projects/ReSAGE/checkpoints"
   best_checkpoint_path: "d:/My_Projects/ReSAGE/checkpoints/baseline_best.pth"
   latest_checkpoint_path: "d:/My_Projects/ReSAGE/checkpoints/baseline_latest.pth"
