@@ -1,204 +1,163 @@
-import argparse
 import os
+import argparse
 import random
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader
 
 from src.models.sae import SparseAutoencoder, sae_loss
 
 
-# =========================
-# Configuration
-# =========================
-
-FEATURE_DIR = "outputs/features"
-CHECKPOINT_DIR = "checkpoints"
-
 LATENT_DIM = 128
-BATCH_SIZE = 512
+BATCH_SIZE = 4096
 EPOCHS = 30
 LEARNING_RATE = 1e-3
 SPARSITY_WEIGHT = 1e-3
-
-# Number of spatial feature vectors sampled from each image
 SAMPLES_PER_IMAGE = 512
-
 SEED = 42
 
 
-# =========================
-# Reproducibility
-# =========================
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-# =========================
-# Dataset
-# =========================
+def build_training_dataset(feature_dir):
+    """
+    Load each feature map once, sample 512 spatial locations,
+    and create a tensor dataset of 64-D feature vectors.
+    """
 
-class FeatureDataset(Dataset):
+    files = sorted(
+        f for f in os.listdir(feature_dir)
+        if f.endswith(".npy")
+    )
 
-    def __init__(
-        self,
-        feature_dir,
-        samples_per_image=512
-    ):
+    print(f"Feature files found: {len(files)}")
 
-        self.feature_files = sorted([
-            os.path.join(feature_dir, f)
-            for f in os.listdir(feature_dir)
-            if f.endswith(".npy")
-        ])
+    all_samples = []
 
-        self.samples_per_image = samples_per_image
+    for idx, filename in enumerate(files):
 
-        print(f"Feature files found: {len(self.feature_files)}")
+        path = os.path.join(feature_dir, filename)
 
-        if len(self.feature_files) == 0:
-            raise RuntimeError(
-                f"No .npy feature files found in {feature_dir}"
+        feature_map = np.load(path).astype(np.float32)
+
+        # Expected shape: (64, 128, 128)
+        if feature_map.shape != (64, 128, 128):
+            raise ValueError(
+                f"Unexpected feature shape {feature_map.shape} "
+                f"in {filename}"
             )
 
-        # Total number of training vectors
-        self.total_samples = (
-            len(self.feature_files) * samples_per_image
-        )
-
-    def __len__(self):
-        return self.total_samples
-
-    def __getitem__(self, index):
-
-        # Which feature image
-        image_index = index // self.samples_per_image
-
-        feature_path = self.feature_files[image_index]
-
-        # Load feature map
-        feature_map = np.load(feature_path)
-
-        # Expected shape:
+        # Convert:
         # (64, 128, 128)
+        # →
+        # (128*128, 64)
+        vectors = feature_map.reshape(64, -1).T
 
-        if feature_map.ndim != 3:
-            raise ValueError(
-                f"Unexpected feature shape: {feature_map.shape}"
-            )
+        # Deterministic sampling
+        rng = np.random.default_rng(SEED + idx)
 
-        channels, height, width = feature_map.shape
-
-        if channels != 64:
-            raise ValueError(
-                f"Expected 64 channels, got {channels}"
-            )
-
-        # Deterministic spatial sampling
-        sample_index = index % self.samples_per_image
-
-        # Generate deterministic pseudo-random coordinates
-        rng = np.random.default_rng(
-            SEED + index
+        selected_indices = rng.choice(
+            vectors.shape[0],
+            size=SAMPLES_PER_IMAGE,
+            replace=False
         )
 
-        y = rng.integers(0, height)
-        x = rng.integers(0, width)
+        sampled = vectors[selected_indices]
 
-        # Extract 64-D feature vector
-        feature_vector = feature_map[:, y, x]
+        all_samples.append(sampled)
 
-        return torch.tensor(
-            feature_vector,
-            dtype=torch.float32
-        )
+        if (idx + 1) % 200 == 0:
+            print(
+                f"Processed {idx + 1}/{len(files)} feature files"
+            )
 
+    # Shape:
+    # (3200, 512, 64)
+    all_samples = np.concatenate(all_samples, axis=0)
 
-# =========================
-# Validation
-# =========================
+    print("\nDataset construction complete.")
+    print(f"Training vectors: {all_samples.shape[0]}")
+    print(f"Feature dimension: {all_samples.shape[1]}")
 
-def validate_dataset(dataset):
+    tensor = torch.from_numpy(all_samples)
 
-    print("\nChecking dataset...")
+    print(f"Tensor size: {tensor.shape}")
+    print(
+        f"Memory usage: "
+        f"{tensor.numel() * tensor.element_size() / (1024**2):.1f} MB"
+    )
 
-    x = dataset[0]
-
-    print("Sample shape:", x.shape)
-    print("Sample dtype:", x.dtype)
-    print("Sample min:", x.min().item())
-    print("Sample max:", x.max().item())
-    print("Sample mean:", x.mean().item())
-    print("Sample std:", x.std().item())
-
-    assert x.shape == (64,)
-
-    print("Dataset check passed.\n")
+    return tensor
 
 
-# =========================
-# Training
-# =========================
+def main():
 
-def parse_args():
     parser = argparse.ArgumentParser(
         description="Train Sparse Autoencoder on ReSAGE features"
     )
 
     parser.add_argument(
         "--feature_dir",
-        default="outputs/features",
-        help="Directory containing extracted feature .npy files"
+        type=str,
+        default="outputs/features"
     )
 
     parser.add_argument(
         "--checkpoint_dir",
-        default="checkpoints",
-        help="Directory for SAE checkpoints"
+        type=str,
+        default="checkpoints"
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
 
-def main():
+    set_seed(SEED)
 
-    args = parse_args()
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+    # ---------------------------------------------------------
+    # Device
+    # ---------------------------------------------------------
 
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
-    print("Device:", device)
+    print(f"Device: {device}")
 
     if torch.cuda.is_available():
-        print("GPU:", torch.cuda.get_device_name(0))
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # Create dataset
-    dataset = FeatureDataset(
-        args.feature_dir,
-        SAMPLES_PER_IMAGE
+    # ---------------------------------------------------------
+    # Build dataset
+    # ---------------------------------------------------------
+
+    print("\nBuilding training dataset...")
+
+    features = build_training_dataset(
+        args.feature_dir
     )
 
-    validate_dataset(dataset)
+    dataset = TensorDataset(features)
 
-    print(
-        f"Training vectors: {len(dataset):,}"
-    )
-
-    # DataLoader
     loader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=0,
+        num_workers=2,
         pin_memory=torch.cuda.is_available()
     )
 
-    # SAE
+    # ---------------------------------------------------------
+    # Model
+    # ---------------------------------------------------------
+
     model = SparseAutoencoder(
         input_dim=64,
         latent_dim=LATENT_DIM
@@ -210,17 +169,18 @@ def main():
     )
 
     print(
-        f"SAE parameters: "
+        f"\nSAE parameters: "
         f"{sum(p.numel() for p in model.parameters()):,}"
     )
 
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    print(f"Batch size: {BATCH_SIZE}")
+    print(f"Epochs: {EPOCHS}")
+
+    # ---------------------------------------------------------
+    # Training
+    # ---------------------------------------------------------
 
     best_loss = float("inf")
-
-    # =========================
-    # Training loop
-    # =========================
 
     for epoch in range(1, EPOCHS + 1):
 
@@ -232,76 +192,99 @@ def main():
 
         for batch in loader:
 
-            batch = batch.to(
+            x = batch[0].to(
                 device,
                 non_blocking=True
             )
 
             optimizer.zero_grad()
 
-            reconstructed, latent = model(batch)
+            reconstructed, z = model(x)
 
             loss, reconstruction_loss, sparsity_loss = sae_loss(
-                batch,
+                x,
                 reconstructed,
-                latent,
-                SPARSITY_WEIGHT
+                z,
+                sparsity_weight=SPARSITY_WEIGHT
             )
+
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Non-finite loss detected at epoch {epoch}"
+                )
 
             loss.backward()
 
             optimizer.step()
 
-            total_loss += loss.item()
-            total_reconstruction += reconstruction_loss.item()
-            total_sparsity += sparsity_loss.item()
+            batch_size = x.size(0)
 
-        num_batches = len(loader)
+            total_loss += loss.item() * batch_size
+            total_reconstruction += (
+                reconstruction_loss.item() * batch_size
+            )
+            total_sparsity += (
+                sparsity_loss.item() * batch_size
+            )
 
-        avg_loss = total_loss / num_batches
+        dataset_size = len(dataset)
+
+        avg_loss = total_loss / dataset_size
         avg_reconstruction = (
-            total_reconstruction / num_batches
+            total_reconstruction / dataset_size
         )
         avg_sparsity = (
-            total_sparsity / num_batches
+            total_sparsity / dataset_size
         )
 
         print(
             f"Epoch [{epoch:02d}/{EPOCHS}] "
-            f"Loss={avg_loss:.6f} "
-            f"Recon={avg_reconstruction:.6f} "
-            f"Sparsity={avg_sparsity:.6f}"
+            f"Loss: {avg_loss:.6f} | "
+            f"Recon: {avg_reconstruction:.6f} | "
+            f"Sparsity: {avg_sparsity:.6f}"
         )
 
-        # Save best model
+        # -----------------------------------------------------
+        # Save latest checkpoint
+        # -----------------------------------------------------
+
+        checkpoint = {
+            "epoch": epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "loss": avg_loss,
+            "reconstruction_loss": avg_reconstruction,
+            "sparsity_loss": avg_sparsity,
+            "latent_dim": LATENT_DIM
+        }
+
+        torch.save(
+            checkpoint,
+            os.path.join(
+                args.checkpoint_dir,
+                "sae_latest.pth"
+            )
+        )
+
         if avg_loss < best_loss:
 
             best_loss = avg_loss
 
-            checkpoint_path = os.path.join(
-                args.checkpoint_dir,
-                "sae_best.pth"
-            )
-
             torch.save(
-                {
-                    "epoch": epoch,
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "loss": best_loss,
-                },
-                checkpoint_path
+                checkpoint,
+                os.path.join(
+                    args.checkpoint_dir,
+                    "sae_best.pth"
+                )
             )
 
             print(
-                f"  ✓ Saved best checkpoint: "
-                f"{checkpoint_path}"
+                f"  Best checkpoint saved "
+                f"(loss={best_loss:.6f})"
             )
 
     print("\nSAE training completed.")
-    print(
-        f"Best loss: {best_loss:.6f}"
-    )
+    print(f"Best loss: {best_loss:.6f}")
 
 
 if __name__ == "__main__":
